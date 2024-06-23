@@ -9,7 +9,9 @@ pub struct Config {
     pub listen_address: String,
     pub listen_port: u16,
     pub tls_certifcate: String,
-    pub tls_private_key: String
+    pub tls_private_key: String,
+    pub maximum_receive_size: usize,
+    pub mtu: usize,
 }
 
 pub fn get_clone() -> Config {
@@ -22,7 +24,7 @@ pub fn get_clone() -> Config {
 
 pub fn initialize() -> anyhow::Result<()> {
     let file_content = fs::read_to_string(FILENAME)?;
-    let data: Config = serde_json::from_str(&file_content)?;
+    let data: Config = serde_yaml::from_str(&file_content)?;
 
     unsafe {
         CONFIG_DATA = Some(data);

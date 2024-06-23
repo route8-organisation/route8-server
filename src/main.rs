@@ -22,6 +22,10 @@ async fn stream_receive(stream: &mut tokio_native_tls::TlsStream<tokio::net::Tcp
     loop {
         let rx_size = stream.read(&mut buffer).await.map_err(|e| anyhow!("failed to receive due to {}", e.to_string()))?;
 
+        if rx_size == 0 {
+            return Err(anyhow!("stream closed"));
+        }
+
         if buffer_blob.len() + rx_size >= maximum_receive_size {
             return Err(anyhow!("maximum packet size reached"));
         }
@@ -103,7 +107,10 @@ async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::n
 async fn client_procedure(mut stream: tokio_native_tls::TlsStream<tokio::net::TcpStream>, connaddr: &String) -> anyhow::Result<()> {
     client_authentication(&mut stream, connaddr).await.map_err(|e| anyhow!("failed to authenticate due to {}", e.to_string()))?;
 
-    Ok(())
+    loop {
+        let recv_data = stream_receive(&mut stream).await.map_err(|e| anyhow!("failed to receive due to {}", e.to_string()))?;
+        accessln!(connaddr, "< {}", recv_data);
+    }
 }
 
 async fn server() -> anyhow::Result<()> {
