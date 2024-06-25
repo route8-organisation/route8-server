@@ -80,6 +80,7 @@ macro_rules! accessln {
 
             let mut stdout = std::io::stdout();
             let _ = write!(stdout, "[{}.{:03}][access][{}] ", time_friendly, milliseconds, $module);
+
             let _ = write!(stdout, $fmt $(, $args)*);
             let _ = write!(stdout, "\n");
         }
