@@ -3,6 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub mod debug;
 pub mod config;
+pub mod db;
 
 static mut MAXIMUM_RECEIVE_SIZE: Option<usize> = None;
 static mut STREAM_MTU: Option<usize> = None;
@@ -74,7 +75,7 @@ async fn stream_write(stream: &mut tokio_native_tls::TlsStream<tokio::net::TcpSt
     }
 }
 
-async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::net::TcpStream>, connaddr: &String) -> anyhow::Result<()> {
+async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::net::TcpStream>, connaddr: &String) -> anyhow::Result<String> {
     let packet = stream_receive(stream).await?;
     let json_packet: serde_json::Value = serde_json::from_str(&packet).context("invalid json packet")?;
 
@@ -87,14 +88,14 @@ async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::n
         return Err(anyhow!("failed to authenticate due to invalid packet"));
     }
 
-    if field_identity == "foobar" && field_password == "foobar" {
+    if db::authenticate_check(&field_identity.to_owned(), &field_password.to_owned()).await? {
         let _ = stream_write(stream, serde_json::json!({
             "auth": "authenticated"
         }).to_string()).await?;
 
         accessln!(connaddr, "client authenticated");
 
-        return Ok(());
+        return Ok(field_identity.to_owned());
     } else {
         let _ = stream_write(stream, serde_json::json!({
             "auth": "unathorized"
@@ -105,11 +106,26 @@ async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::n
 }
 
 async fn client_procedure(mut stream: tokio_native_tls::TlsStream<tokio::net::TcpStream>, connaddr: &String) -> anyhow::Result<()> {
-    client_authentication(&mut stream, connaddr).await.map_err(|e| anyhow!("failed to authenticate due to {}", e.to_string()))?;
+    let endpoint_identifier = client_authentication(&mut stream, connaddr).await.map_err(|e| anyhow!("failed to authenticate due to {}", e.to_string()))?;
 
     loop {
-        let recv_data = stream_receive(&mut stream).await.map_err(|e| anyhow!("failed to receive due to {}", e.to_string()))?;
-        accessln!(connaddr, "< {}", recv_data);
+        let recv_data: serde_json::Value = serde_json::from_str(&stream_receive(&mut stream).await.map_err(|e| anyhow!("failed to receive due to {}", e.to_string()))?)?;
+
+        let field_command = recv_data["command"].as_str().context("missing 'command' field")?;
+        let field_data = recv_data.get("data").context("missing 'data' field")?;
+
+        if field_command == "log" {
+            let field_data_identifier = field_data["identifier"].as_str().context("missing 'data.identifier' field")?;
+            let field_data_timestamp = field_data["timestamp"].as_i64().context("missing 'data.timestamp' field")?;
+            let field_data_message = field_data.get("message").context("missing 'data.message' field")?;
+
+            db::upload_log(&db::LogObject {
+                endpoint_identifier: endpoint_identifier.clone(),
+                log_identifier: field_data_identifier.to_owned(),
+                timestamp: field_data_timestamp,
+                message: field_data_message.clone()
+            }).await;
+        }
     }
 }
 
@@ -150,6 +166,15 @@ async fn server() -> anyhow::Result<()> {
     }
 }
 
+fn initialize_global_variables() {
+    let config_clone = config::get_clone();
+
+    unsafe {
+        MAXIMUM_RECEIVE_SIZE = Some(config_clone.maximum_receive_size);
+        STREAM_MTU = Some(config_clone.mtu);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = debug::initialize() {
@@ -164,14 +189,11 @@ async fn main() {
         return;
     }
 
-    // locked scope
-    {
-        let config_clone = config::get_clone();
+    initialize_global_variables();
 
-        unsafe {
-            MAXIMUM_RECEIVE_SIZE = Some(config_clone.maximum_receive_size);
-            STREAM_MTU = Some(config_clone.mtu);
-        }
+    if let Err(e) = db::initialize().await {
+        errorln!("db", "failed to initialize due to {}", e.to_string());
+        return;
     }
 
     if let Err(e) = server().await {
