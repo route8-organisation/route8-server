@@ -12,6 +12,9 @@ pub struct Config {
     pub tls_private_key: String,
     pub maximum_receive_size: usize,
     pub mtu: usize,
+    pub db_remote_address: String,
+    pub db_remote_port: u16,
+    pub db_password: String,
 }
 
 pub fn get_clone() -> Config {
