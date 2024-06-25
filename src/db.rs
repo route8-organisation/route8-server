@@ -1,25 +1,50 @@
 use std::sync::Arc;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use once_cell::sync::Lazy;
 
 use crate::{config, errorln, outputln};
 
 #[derive(Debug, Clone)]
-pub struct DataChannelObject {
+pub struct LogObject {
     pub endpoint_identifier: String,
     pub log_identifier: String,
     pub timestamp: i64,
     pub message: serde_json::Value,
 }
 
-static mut DATA_CHANNEL: Lazy<(tokio::sync::mpsc::Sender<DataChannelObject>, tokio::sync::mpsc::Receiver<DataChannelObject>)> = Lazy::new(||
+#[derive(Debug, Clone)]
+pub struct AuthenticateObject {
+    pub identifier: String,
+    pub password: String,
+    pub response_tx: tokio::sync::mpsc::Sender<bool>
+}
+
+pub enum DataChannelCommands {
+    Log(LogObject),
+    Authenticate(AuthenticateObject),
+}
+
+static mut DATA_CHANNEL: Lazy<(tokio::sync::mpsc::Sender<DataChannelCommands>, tokio::sync::mpsc::Receiver<DataChannelCommands>)> = Lazy::new(||
     tokio::sync::mpsc::channel(4096)
 );
 
-pub async fn upload_log(data: &DataChannelObject) {
+pub async fn upload_log(data: &LogObject) {
     let tx = unsafe { &mut DATA_CHANNEL.0 };
-    let _ = tx.send(data.clone()).await;
+    let _ = tx.send(DataChannelCommands::Log(data.clone())).await;
+}
+
+pub async fn authenticate_check(identifier: &String, password: &String) -> anyhow::Result<bool> {
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    let tx = unsafe { &mut DATA_CHANNEL.0 };
+
+    tx.send(DataChannelCommands::Authenticate(AuthenticateObject {
+        identifier: identifier.clone(),
+        password: password.clone(),
+        response_tx: response_tx
+    })).await?;
+
+    Ok(response_rx.recv().await.context("internal db module didn't respond")?)
 }
 
 #[derive(Debug, Clone)]
@@ -111,32 +136,48 @@ async fn worker_thread() -> anyhow::Result<()> {
         }
     });
 
-    tokio::select! {
-        connection_lost_data = connection_lost_rx.recv() => {
-            if connection_lost_data.is_some() {
-                return Err(anyhow!("connection closed"));
+    loop {
+        tokio::select! {
+            connection_lost_data = connection_lost_rx.recv() => {
+                if connection_lost_data.is_some() {
+                    return Err(anyhow!("connection closed"));
+                }
             }
-        }
-        data = data_rx.recv() => {
-            if let Some(data) = data {
-                let transaction = client.transaction().await?;
+            data = data_rx.recv() => {
+                if let Some(data) = data {
+                    match data {
+                        DataChannelCommands::Log(data) => {
+                            let transaction = client.transaction().await?;
 
-                transaction.execute(r#"INSERT INTO tb_log (
-                        endpoint_identifier,
-                        log_identifier,
-                        timestamp,
-                        message
-                    ) VALUES (
-                        $1, $2, $3, $4
-                    )"#,
-                    &[&data.endpoint_identifier, &data.log_identifier, &data.timestamp, &data.message]).await?;
+                            transaction.execute(r#"INSERT INTO tb_log (
+                                    endpoint_identifier,
+                                    log_identifier,
+                                    timestamp,
+                                    message
+                                ) VALUES (
+                                    $1, $2, $3, $4
+                                )"#,
+                                &[&data.endpoint_identifier, &data.log_identifier, &data.timestamp, &data.message]).await?;
 
-                transaction.commit().await?;
+                            transaction.commit().await?;
+                        },
+                        DataChannelCommands::Authenticate(data) => {
+                            let transaction = client.transaction().await?;
+
+                            let query = transaction.query(r#"SELECT 1 FROM tb_endpoints WHERE
+                                identifier = $1 AND password = $2"#,
+                                &[&data.identifier, &data.password]).await?;
+
+                            match query.first() {
+                                Some(_) => data.response_tx.send(true).await?,
+                                None => data.response_tx.send(false).await?,
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-
-    Ok(())
 }
 
 pub async fn initialize() -> anyhow::Result<()> {

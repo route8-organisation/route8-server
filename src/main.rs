@@ -88,7 +88,7 @@ async fn client_authentication(stream: &mut tokio_native_tls::TlsStream<tokio::n
         return Err(anyhow!("failed to authenticate due to invalid packet"));
     }
 
-    if field_identity == "foobar" && field_password == "foobar" {
+    if db::authenticate_check(&field_identity.to_owned(), &field_password.to_owned()).await? {
         let _ = stream_write(stream, serde_json::json!({
             "auth": "authenticated"
         }).to_string()).await?;
@@ -119,7 +119,7 @@ async fn client_procedure(mut stream: tokio_native_tls::TlsStream<tokio::net::Tc
             let field_data_timestamp = field_data["timestamp"].as_i64().context("missing 'data.timestamp' field")?;
             let field_data_message = field_data.get("message").context("missing 'data.message' field")?;
 
-            db::upload_log(&db::DataChannelObject {
+            db::upload_log(&db::LogObject {
                 endpoint_identifier: endpoint_identifier.clone(),
                 log_identifier: field_data_identifier.to_owned(),
                 timestamp: field_data_timestamp,
